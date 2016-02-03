@@ -407,89 +407,129 @@ function Jasmine2ScreenShotReporter(opts) {
         runningSuite._specs.push(spec);
     };
 
+    function takeScreenshot(spec) {
+      return Promise.all([
+        browser.takeScreenshot(),
+        browser.getCapabilities()
+      ])
+      .then(function(results) {
+        var promises = [];
+        var png = results[0];
+        var caps = results[1];
+        var file = opts.pathBuilder(spec, suites, caps);
+        spec.filename = file + '.png';
+        var screenshotPath = path.join(opts.dest, spec.filename);
+        var metadata = opts.metadataBuilder(spec, suites, caps);
+        if (metadata) {
+          var metadataPath = path.join(opts.dest, file + '.json');
+          promises.push(new Promise(function(resolve, reject) {
+            mkdirp(path.dirname(metadataPath), function(err) {
+              if (err) {
+                reject(new Error('Could not create directory for ' + metadataPath));
+              } else {
+                try {
+                  writeMetadata(metadata, metadataPath);
+                  resolve();
+                } catch (e) {
+                  reject(e);
+                }
+              }
+            });
+          }));
+        }
+        promises.push(new Promise(function(resolve, reject) {
+          mkdirp(path.dirname(screenshotPath), function(err) {
+            if (err) {
+              reject(new Error('Could not create directory for ' + screenshotPath));
+            } else {
+              writeScreenshot(png, spec.filename);
+              console.log('screenshot saved to ' + spec.filename);
+              resolve();
+            }
+          });
+        }));
+        return Promise.all(promises);
+      });
+    }
+
+    var screenshotPromises = {};
+
+    this.postTest = function(passed, info) {
+      var fullName = [info.category, info.name].join(' ');
+      var deferred = {};
+      deferred.promise = new Promise(function(resolve, reject) {
+        deferred.resolve = resolve;
+        deferred.reject = reject;
+      });
+      screenshotPromises[fullName] = deferred;
+      return deferred.promise;
+    };
+
     this.specDone = function(spec) {
-        var file;
         spec = getSpecClone(spec);
         spec._finished = Date.now();
 
         if (!isSpecValid(spec)) {
           spec.skipPrinting = true;
+          screenshotPromises[spec.fullName].resolve();
           return;
         }
 
-        browser.takeScreenshot().then(function (png) {
-            browser.getCapabilities().then(function (capabilities) {
-                var screenshotPath,
-                    metadataPath,
-                    metadata;
-
-                file = opts.pathBuilder(spec, suites, capabilities);
-                spec.filename = file + '.png';
-
-                screenshotPath = path.join(opts.dest, spec.filename);
-                metadata       = opts.metadataBuilder(spec, suites, capabilities);
-
-                if (metadata) {
-                    metadataPath = path.join(opts.dest, file + '.json');
-                    mkdirp(path.dirname(metadataPath), function(err) {
-                        if(err) {
-                            throw new Error('Could not create directory for ' + metadataPath);
-                        }
-                        writeMetadata(metadata, metadataPath);
-                    });
-                }
-
-                mkdirp(path.dirname(screenshotPath), function(err) {
-                    if(err) {
-                        throw new Error('Could not create directory for ' + screenshotPath);
-                    }
-                    writeScreenshot(png, spec.filename);
-                });
-            });
+        takeScreenshot(spec)
+        .then(function() {
+          screenshotPromises[spec.fullName].resolve();
+        })
+        .catch(function(e) {
+          screenshotPromises[spec.fullName].reject(e);
         });
     };
 
     this.jasmineDone = function() {
-      var output = '';
+      Promise.all(Object.keys(screenshotPromises).map(function(name) {
+        return screenshotPromises[name].promise;
+      }))
+      .then(function() {
+        var output = '';
 
-      if (runningSuite) {
+        if (runningSuite) {
           // focused spec (fit) -- suiteDone was never called
           self.suiteDone(fakeFocusedSuite);
-      }
+        }
 
-      _.each(suites, function(suite) {
-        output += printResults(suite);
-      });
-
-      // Ideally this shouldn't happen, but some versions of jasmine will allow it
-      _.each(specs, function(spec) {
-        output += printSpec(spec);
-      });
-
-      // Add configuration information when requested and only if specs have been reported.
-      if (opts.showConfiguration) {
-        var suiteHasSpecs = false;
-        
-        _.each(specs, function(spec) {
-          suiteHasSpecs = spec.isPrinted || suiteHasSpecs;
+        _.each(suites, function (suite) {
+          output += printResults(suite);
         });
 
-        if (suiteHasSpecs) {
-          output += printTestConfiguration();
-        }
-      }
+        // Ideally this shouldn't happen, but some versions of jasmine will allow it
+        _.each(specs, function (spec) {
+          output += printSpec(spec);
+        });
 
-      fs.appendFileSync(
-        path.join(opts.dest, opts.filename),
-        reportTemplate({ report: output }),
-        { encoding: 'utf8' },
-        function(err) {
-            if(err) {
-              console.error('Error writing to file:' + path.join(opts.dest, opts.filename));
-              throw err;
-            }
+        // Add configuration information when requested and only if specs have been reported.
+        if (opts.showConfiguration) {
+          var suiteHasSpecs = false;
+
+          _.each(specs, function (spec) {
+            suiteHasSpecs = spec.isPrinted || suiteHasSpecs;
+          });
+
+          if (suiteHasSpecs) {
+            output += printTestConfiguration();
+          }
         }
-      );
+
+        fs.appendFileSync(
+        path.join(opts.dest, opts.filename),
+        reportTemplate({report: output}),
+        {encoding: 'utf8'},
+        function (err) {
+          if (err) {
+            console.error('Error writing to file:' + path.join(opts.dest, opts.filename));
+            throw err;
+          }
+        }
+        );
+      });
     };
 
     function printSpec(spec) {
